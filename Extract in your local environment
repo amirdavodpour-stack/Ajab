@@ -1,0 +1,13 @@
+# Clone the repo
+git clone https://github.com/amirdavodpour-stack/Ajab.git
+cd Ajab
+
+# Extract the ZIP
+unzip HOPE-3.8.0_13-WAVE2-S13.zip
+
+# This should create: backend/, mobile/, docs/, etc.
+
+# Push to GitHub
+git add .
+git commit -m "Session 13+: Extract Wave 2 codebase"
+git push
