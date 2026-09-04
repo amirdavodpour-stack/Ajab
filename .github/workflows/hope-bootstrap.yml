@@ -31,7 +31,6 @@ concurrency:
 
 env:
   STAGING_DIR: /tmp/hope-bootstrap
-  REPO_DIR: ${{ github.workspace }}
 
 jobs:
   bootstrap:
@@ -42,36 +41,15 @@ jobs:
     steps:
 
       # ============================================================
-      # 1 — CHECKOUT USING PAT WITH WORKFLOW WRITE PERMISSION
+      # 1 — CHECKOUT
       # ============================================================
 
-      - name: Validate bootstrap token
-        shell: bash
-        env:
-          HOPE_BOOTSTRAP_TOKEN: ${{ secrets.HOPE_BOOTSTRAP_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-
-          if [[ -z "${HOPE_BOOTSTRAP_TOKEN:-}" ]]; then
-            echo "::error::Missing repository secret HOPE_BOOTSTRAP_TOKEN."
-            echo
-            echo "Create a Fine-grained Personal Access Token with:"
-            echo "  Contents  -> Read and write"
-            echo "  Workflows -> Read and write"
-            echo
-            echo "Then save it as:"
-            echo "  HOPE_BOOTSTRAP_TOKEN"
-            exit 1
-          fi
-
-          echo "HOPE_BOOTSTRAP_TOKEN is configured."
-
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: true
-          token: ${{ secrets.HOPE_BOOTSTRAP_TOKEN }}
+          token: ${{ github.token }}
 
       # ============================================================
       # 2 — INITIALIZE
@@ -104,13 +82,10 @@ jobs:
 
       - name: Verify Git authentication
         shell: bash
-        env:
-          HOPE_BOOTSTRAP_TOKEN: ${{ secrets.HOPE_BOOTSTRAP_TOKEN }}
         run: |
           set -Eeuo pipefail
 
-          echo "Checking authenticated Git remote..."
-
+          echo "Checking Git remote..."
           git remote -v
 
           echo
@@ -118,6 +93,7 @@ jobs:
 
           git ls-remote origin HEAD >/dev/null
 
+          echo
           echo "Git authentication: OK"
 
       # ============================================================
@@ -159,7 +135,6 @@ jobs:
 
             SELECTED=""
 
-            # Prefer HOPE-named archives.
             for FILE in "${ZIP_FILES[@]}"; do
               BASE="$(basename "$FILE")"
 
@@ -169,7 +144,6 @@ jobs:
               fi
             done
 
-            # Fallback to first ZIP.
             if [[ -z "$SELECTED" ]]; then
               SELECTED="${ZIP_FILES[0]}"
             fi
@@ -181,7 +155,6 @@ jobs:
           echo "SELECTED ARCHIVE"
           echo "=============================================="
           echo "$SELECTED"
-          echo
 
           echo "archive=$SELECTED" >> "$GITHUB_OUTPUT"
 
@@ -218,19 +191,16 @@ jobs:
 
           while IFS= read -r ENTRY; do
 
-            # Absolute Unix path.
             if [[ "$ENTRY" == /* ]]; then
               echo "::error::Absolute path detected: $ENTRY"
               exit 1
             fi
 
-            # Windows drive path.
             if [[ "$ENTRY" =~ ^[A-Za-z]: ]]; then
               echo "::error::Windows absolute path detected: $ENTRY"
               exit 1
             fi
 
-            # Traversal.
             if [[ "$ENTRY" == ../* ]]; then
               echo "::error::Path traversal detected: $ENTRY"
               exit 1
@@ -246,7 +216,6 @@ jobs:
               exit 1
             fi
 
-            # Backslash traversal.
             if [[ "$ENTRY" == ..\\* ]]; then
               echo "::error::Path traversal detected: $ENTRY"
               exit 1
@@ -262,7 +231,7 @@ jobs:
           echo "Archive path validation: OK"
 
       # ============================================================
-      # 7 — EXTRACT OUTSIDE GITHUB WORKSPACE
+      # 7 — EXTRACT OUTSIDE WORKSPACE
       # ============================================================
 
       - name: Extract project
@@ -277,7 +246,7 @@ jobs:
           rm -rf "$EXTRACT"
           mkdir -p "$EXTRACT"
 
-          echo "Extracting ZIP outside GitHub workspace:"
+          echo "Extracting ZIP:"
           echo "$EXTRACT"
 
           unzip -q "$ZIP" -d "$EXTRACT"
@@ -324,7 +293,6 @@ jobs:
               | sort
           )
 
-          # Handle ZIPs with a single wrapper directory.
           if [[ "${#TOP_FILES[@]}" -eq 0 &&
                 "${#TOP_DIRS[@]}" -eq 1 ]]; then
 
@@ -336,9 +304,7 @@ jobs:
               -d "$CANDIDATE/.github" ||
               -d "$CANDIDATE/docs"
             ]]; then
-
               ROOT="$CANDIDATE"
-
             fi
           fi
 
@@ -366,12 +332,10 @@ jobs:
 
           PROMPT=""
 
-          # Preferred canonical location.
           if [[ -f "$ROOT/docs/roadmap/SUPERPROMPT.md" ]]; then
             PROMPT="$ROOT/docs/roadmap/SUPERPROMPT.md"
           fi
 
-          # Search by filename/content.
           if [[ -z "$PROMPT" ]]; then
 
             while IFS= read -r FILE; do
@@ -403,14 +367,11 @@ jobs:
 
             echo "::error::No HOPE SUPERPROMPT found."
 
-            echo
-            echo "Possible prompt files:"
             find "$ROOT" \
               -type f \
               -iname "*.md" \
               | sort \
-              | grep -iE \
-                "prompt|super|roadmap" \
+              | grep -iE "prompt|super|roadmap" \
               || true
 
             exit 1
@@ -423,7 +384,7 @@ jobs:
           echo "prompt=$PROMPT" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 10 — SYNCHRONIZE EXTRACTED PROJECT SAFELY
+      # 10 — SYNCHRONIZE EXTRACTED PROJECT
       # ============================================================
 
       - name: Synchronize extracted project
@@ -434,14 +395,6 @@ jobs:
           set -Eeuo pipefail
 
           echo "Synchronizing extracted project..."
-
-          # CRITICAL:
-          #
-          # ROOT lives in /tmp.
-          # Destination is GITHUB_WORKSPACE.
-          #
-          # This prevents rsync --delete from deleting
-          # its own source tree.
 
           rsync -a \
             --delete \
@@ -478,8 +431,6 @@ jobs:
           echo
           echo "Project verification: OK"
 
-          echo
-          echo "Important files:"
           for FILE in \
             "docs/roadmap/SUPERPROMPT.md" \
             "docs/roadmap/MULTI-VERTICAL-ROADMAP.md" \
@@ -489,7 +440,7 @@ jobs:
             "package-lock.json"
           do
             if [[ -e "$FILE" ]]; then
-              echo "  [OK] $FILE"
+              echo "[OK] $FILE"
             fi
           done
 
@@ -552,28 +503,16 @@ jobs:
           2. Read the current STATE.
           3. Read the active session plan.
           4. Inspect the actual repository.
-          5. Execute ONLY the current session unless the SUPERPROMPT explicitly allows otherwise.
+          5. Execute ONLY the current session unless explicitly allowed otherwise.
 
           ## PRODUCT
 
           HOPE is evolving from a jobs marketplace into a professional
           multi-vertical marketplace / super-app.
 
-          The UX quality target is comparable to mature consumer
-          super-apps and marketplaces.
-
-          Snapp may be used only as inspiration for product patterns.
-
-          Never copy:
-          - proprietary source code
-          - proprietary assets
-          - trademarks
-          - branding
-          - pixel-identical screens
+          Existing Jobs functionality MUST NOT be broken.
 
           ## NON-NEGOTIABLE
-
-          Existing Jobs functionality MUST NOT be broken.
 
           Never invent:
           - APIs
@@ -583,7 +522,7 @@ jobs:
           - backend contracts
           - existing business rules
 
-          Inspect the actual code and schema first.
+          Inspect the actual implementation first.
 
           ## ENGINEERING STANDARD
 
@@ -598,56 +537,22 @@ jobs:
           - localization-ready
           - RTL-aware where appropriate
 
-          ## FLUTTER
-
-          Prefer:
-          - clear feature boundaries
-          - reusable widgets
-          - design tokens
-          - typed models
-          - explicit state management
-          - repository/service separation
-          - loading/error/empty states
-          - responsive layouts
-          - accessibility semantics
-
-          Do not create fake UI that is disconnected from real data.
-
-          ## BACKEND
-
-          Backend changes must preserve:
-          - existing API contracts
-          - validation
-          - authorization
-          - error semantics
-          - migrations
-          - indexes
-          - auditability
-
           ## VERIFICATION
 
           Before closing the session:
 
-          1. Run relevant formatting.
+          1. Run formatting.
           2. Run analyzer/linter.
-          3. Run relevant unit tests.
-          4. Run integration/contract tests when available.
-          5. Run build checks when appropriate.
-          6. Inspect git diff.
-          7. Update STATE.
-          8. Document important decisions.
-          9. Commit a clean checkpoint.
-
-          ## SESSION DISCIPLINE
-
-          Do not silently skip required work.
-
-          If a dependency/network/tooling problem prevents verification,
-          record the exact blocker in STATE rather than pretending success.
+          3. Run relevant tests.
+          4. Run build checks when appropriate.
+          5. Inspect git diff.
+          6. Update STATE.
+          7. Document blockers.
+          8. Commit a clean checkpoint.
 
           ## GIT
 
-          Work on the dedicated session branch.
+          Work only on the dedicated session branch.
 
           Never force-push main/master.
 
@@ -694,9 +599,7 @@ jobs:
 
           fi
 
-          if [[ -z "$SESSION" ]]; then
-            SESSION="0"
-          fi
+          [[ -z "$SESSION" ]] && SESSION="0"
 
           echo
           echo "=============================================="
@@ -714,6 +617,8 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: 22
+          cache: npm
+        continue-on-error: true
 
       # ============================================================
       # 16 — SETUP FLUTTER
@@ -760,16 +665,12 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Preparing dependencies..."
-
           if [[ -f pubspec.yaml ]]; then
-            echo
             echo "Flutter dependencies..."
             flutter pub get
           fi
 
           if [[ -f package.json ]]; then
-            echo
             echo "Root Node dependencies..."
 
             if [[ -f package-lock.json ]]; then
@@ -780,7 +681,6 @@ jobs:
           fi
 
           if [[ -f backend/package.json ]]; then
-            echo
             echo "Backend Node dependencies..."
 
             (
@@ -806,24 +706,26 @@ jobs:
 
           SESSION="${{ steps.state.outputs.current_session }}"
 
-          if [[ "$SESSION" == "0" ]]; then
-            SESSION="1"
-          fi
+          [[ "$SESSION" == "0" ]] && SESSION="1"
 
           BRANCH="copilot/hope-session-${SESSION}"
 
-          echo "Creating branch:"
-          echo "$BRANCH"
-
           git config user.name "HOPE Copilot Agent"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin \
-            "+refs/heads/*:refs/remotes/origin/*" \
-            --prune
+          echo "Preparing branch: $BRANCH"
 
-          git switch -C "$BRANCH"
+          git fetch origin --prune
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Remote branch already exists; resetting local branch to origin/$BRANCH."
+
+            git fetch origin "$BRANCH"
+            git switch -C "$BRANCH" "origin/$BRANCH"
+          else
+            echo "Creating new branch from current checked-out commit."
+            git switch -C "$BRANCH"
+          fi
 
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
@@ -837,30 +739,24 @@ jobs:
           set -Eeuo pipefail
 
           git config user.name "HOPE Copilot Agent"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
 
           if git diff --cached --quiet; then
-
             echo "No bootstrap preparation changes."
-
           else
-
-            git commit \
-              -m "chore(hope): prepare autonomous Copilot workspace"
-
+            git commit -m "chore(hope): prepare autonomous Copilot workspace"
           fi
 
       # ============================================================
-      # 21 — PUSH BOOTSTRAP BRANCH USING PAT
+      # 21 — PUSH BOOTSTRAP BRANCH
       # ============================================================
 
       - name: Push bootstrap branch
-        shell: bash
         env:
           BRANCH: ${{ steps.branch.outputs.branch }}
+        shell: bash
         run: |
           set -Eeuo pipefail
 
@@ -868,15 +764,6 @@ jobs:
           echo "PUSH BOOTSTRAP BRANCH"
           echo "=============================================="
           echo "Branch: $BRANCH"
-          echo
-
-          # The checkout action authenticated Git using
-          # HOPE_BOOTSTRAP_TOKEN.
-          #
-          # That token MUST have:
-          #
-          # Contents  -> Read and write
-          # Workflows -> Read and write
 
           git push \
             --set-upstream \
@@ -896,24 +783,21 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Installing GitHub Copilot CLI..."
-
           npm install -g @github/copilot
 
-          echo
           copilot --version
 
       # ============================================================
-      # 23 — BUILD AUTONOMOUS AGENT INSTRUCTION
+      # 23 — BUILD COPILOT INSTRUCTION
       # ============================================================
 
       - name: Build Copilot instruction
         if: ${{ inputs.start_agent }}
-        shell: bash
         env:
           SESSION: ${{ steps.state.outputs.current_session }}
           BRANCH: ${{ steps.branch.outputs.branch }}
           PROMPT: ${{ steps.prompt.outputs.prompt }}
+        shell: bash
         run: |
           set -Eeuo pipefail
 
@@ -927,13 +811,11 @@ jobs:
           AUTHORITATIVE INSTRUCTION
           ============================================================
 
-          The authoritative project instruction is:
+          Read this completely before implementation:
 
           docs/roadmap/SUPERPROMPT.md
 
-          READ IT COMPLETELY before making implementation decisions.
-
-          Detected SUPERPROMPT source:
+          Detected SUPERPROMPT:
           $PROMPT
 
           ============================================================
@@ -946,63 +828,62 @@ jobs:
           Current branch:
           $BRANCH
 
-          Execute the current session only.
-
-          Do not jump ahead to unrelated sessions.
+          Execute the CURRENT SESSION ONLY.
 
           ============================================================
           FIRST ACTIONS
           ============================================================
 
-          1. Read docs/roadmap/SUPERPROMPT.md
+          1. Read docs/roadmap/SUPERPROMPT.md completely.
           2. Read the current STATE.
-          3. Read the current session plan.
+          3. Read the active session plan.
           4. Read the roadmap.
-          5. Inspect the actual repository structure.
+          5. Inspect repository structure.
           6. Inspect existing Flutter architecture.
           7. Inspect backend architecture.
           8. Inspect database/schema files.
           9. Inspect existing Jobs functionality.
-          10. Determine what is genuinely implemented versus placeholder.
+          10. Determine what is real versus placeholder.
 
-          Do NOT rely on assumptions.
+          Never rely on assumptions.
 
           ============================================================
           CORE PRODUCT RULE
           ============================================================
 
-          HOPE is being evolved into a professional multi-vertical
+          HOPE is evolving into a professional multi-vertical
           marketplace / super-app.
 
-          Preserve the existing Jobs vertical.
+          Existing Jobs functionality MUST remain functional.
 
-          Jobs must remain functional unless the current session
-          explicitly concerns a safe migration/refactor of Jobs.
+          Snapp may be used only as inspiration for interaction
+          patterns and marketplace ergonomics.
 
-          Never remove working Jobs functionality merely to simplify
-          architecture.
+          Never copy proprietary implementation, assets, branding,
+          trademarks, or pixel-identical screens.
 
           ============================================================
-          UX / UI STANDARD
+          ENGINEERING
           ============================================================
 
-          Build professional consumer-grade UX.
+          Use the existing project architecture where it is sound.
 
-          Use mature super-app patterns as inspiration.
+          Prefer:
 
-          Snapp can be considered inspiration for interaction patterns,
-          information architecture and marketplace ergonomics only.
+          - feature-oriented structure
+          - reusable design-system components
+          - typed models
+          - repositories/services
+          - explicit state management
+          - dependency injection when justified
+          - centralized navigation
+          - centralized error handling
+          - localization
+          - design tokens
+          - accessibility semantics
+          - responsive breakpoints
 
-          NEVER copy:
-          - proprietary source code
-          - proprietary assets
-          - trademarks
-          - branding
-          - pixel-identical screens
-
-          The result must have its own HOPE visual identity.
-
-          Every meaningful screen should account for:
+          Every meaningful screen should handle:
 
           - loading
           - success
@@ -1012,90 +893,29 @@ jobs:
           - disabled
           - validation
           - accessibility
-          - responsive layout
+          - responsive layouts
           - RTL where applicable
           - localization readiness
 
-          Avoid decorative fake UI.
-
-          UI must connect to real application state and real backend
-          contracts when those contracts exist.
+          Do not create decorative fake UI.
 
           ============================================================
-          FLUTTER ENGINEERING
+          BACKEND
           ============================================================
-
-          Use professional Flutter architecture.
-
-          Prefer:
-
-          - feature-oriented organization
-          - reusable design-system components
-          - typed domain models
-          - repositories/services
-          - explicit state management
-          - dependency injection where appropriate
-          - centralized navigation
-          - centralized error handling
-          - centralized localization
-          - theme/design tokens
-          - accessibility semantics
-          - responsive breakpoints
-
-          Do not introduce unnecessary frameworks.
-
-          Reuse existing project architecture when it is sound.
-
-          Refactor only when justified by the current session.
-
-          ============================================================
-          BACKEND ENGINEERING
-          ============================================================
-
-          Backend changes must be based on actual repository code.
 
           Never invent:
 
+          - API endpoints
           - database fields
-          - endpoints
-          - authentication semantics
+          - auth semantics
           - payment semantics
           - permissions
-          - business rules
+          - undocumented business rules
 
-          Inspect existing:
-
-          - schema
-          - migrations
-          - controllers
-          - services
-          - repositories
-          - validators
-          - middleware
-          - error contracts
-          - tests
+          Inspect actual implementation first.
 
           Preserve backward compatibility unless the session explicitly
           defines a migration.
-
-          ============================================================
-          DEPENDENCY HYGIENE
-          ============================================================
-
-          Inspect existing dependencies before adding new ones.
-
-          Prefer existing packages.
-
-          Do not add dependencies merely because they are convenient.
-
-          When upgrading dependencies:
-
-          - inspect compatibility
-          - update lockfiles
-          - run analyzer/linter
-          - run tests
-          - document breaking changes
-          - avoid unnecessary mass upgrades
 
           ============================================================
           SECURITY
@@ -1105,7 +925,7 @@ jobs:
 
           - authentication
           - authorization
-          - input validation
+          - validation
           - rate limiting
           - secure storage
           - secret handling
@@ -1116,13 +936,19 @@ jobs:
 
           Never commit credentials.
 
-          Never disable security controls simply to make a build pass.
+          Never disable security controls merely to make a build pass.
+
+          ============================================================
+          DEPENDENCIES
+          ============================================================
+
+          Reuse existing dependencies whenever practical.
+
+          Do not add dependencies without justification.
 
           ============================================================
           VERIFICATION
           ============================================================
-
-          Verify every meaningful change.
 
           For Flutter:
 
@@ -1133,31 +959,23 @@ jobs:
 
           For Node/backend:
 
-          - npm test where available
-          - npm run lint where available
-          - npm run build where available
-          - migration/schema validation where available
+          - npm test when available
+          - npm run lint when available
+          - npm run build when available
 
-          Run targeted tests first, then broader tests where practical.
-
-          If a verification step cannot run because of an environmental
-          blocker, record the exact blocker.
-
-          NEVER claim a test passed if it was not actually executed.
+          Never claim success for a command that was not actually run.
 
           ============================================================
-          GIT DISCIPLINE
+          GIT
           ============================================================
 
           Work only on:
 
           $BRANCH
 
-          Never push directly to main/master.
+          Never force-push main/master.
 
           Do not rewrite unrelated history.
-
-          Keep commits logical.
 
           Inspect:
 
@@ -1168,84 +986,38 @@ jobs:
           before closeout.
 
           ============================================================
-          STATE / CLOSEOUT
+          CLOSEOUT
           ============================================================
 
-          Before finishing the session:
+          Before finishing:
 
-          1. Complete the planned session work.
-          2. Verify it.
+          1. Complete current session.
+          2. Verify work.
           3. Update STATE.
-          4. Record:
-             - completed work
-             - files/components changed
-             - verification performed
-             - known blockers
-             - risks
-             - next session
-          5. Update roadmap/session documentation if required.
-          6. Commit the completed work.
-          7. Leave a clean/recoverable checkpoint.
+          4. Record completed work.
+          5. Record files changed.
+          6. Record verification.
+          7. Record blockers and risks.
+          8. Record next session.
+          9. Commit a clean checkpoint.
 
-          Do not mark incomplete work as complete.
+          Never fake completion.
 
-          ============================================================
-          AUTONOMOUS BEHAVIOR
-          ============================================================
+          Never mark incomplete work as complete.
 
-          You are expected to investigate, implement, test, debug and
-          improve the project autonomously.
-
-          Do not stop merely because a small issue appears.
-
-          Diagnose and fix reasonable implementation failures yourself.
-
-          However, do not invent requirements that are not supported by
-          the SUPERPROMPT, roadmap or actual repository.
-
-          If the current session cannot safely continue, preserve the
-          repository and document the blocker in STATE.
-
-          ============================================================
-          FINAL OBJECTIVE
-          ============================================================
-
-          Deliver the strongest production-quality implementation of
-          the CURRENT SESSION while preserving existing functionality.
-
-          Do not fake completion.
-
-          Do not merely create documentation when implementation is
-          required.
-
-          Do not merely create UI without real application integration
-          when integration is part of the session.
-
-          Start by reading the SUPERPROMPT and STATE now.
+          Start by reading SUPERPROMPT and STATE now.
           EOF
 
-          echo "Autonomous Copilot instruction created."
+          echo "Copilot instruction created."
 
       # ============================================================
-      # 24 — RUN GITHUB COPILOT AUTOPILOT
+      # 24 — RUN COPILOT AUTOPILOT
       # ============================================================
 
       - name: Run HOPE with GitHub Copilot Autopilot
         if: ${{ inputs.start_agent }}
         env:
-          # For personal repositories GitHub documents
-          # COPILOT_GITHUB_TOKEN authentication.
-          #
-          # The same token must have the necessary Copilot Requests
-          # permission in addition to repository write permissions.
-          COPILOT_GITHUB_TOKEN: ${{ secrets.HOPE_BOOTSTRAP_TOKEN }}
-
-          # GitHub CLI / GitHub tooling.
-          GH_TOKEN: ${{ secrets.HOPE_BOOTSTRAP_TOKEN }}
-
-          # Also expose GITHUB_TOKEN for tools that expect it.
-          GITHUB_TOKEN: ${{ secrets.HOPE_BOOTSTRAP_TOKEN }}
-
+          GITHUB_TOKEN: ${{ github.token }}
           MAX_CONTINUES: ${{ inputs.max_autopilot_continues }}
         shell: bash
         run: |
@@ -1255,8 +1027,6 @@ jobs:
           echo "GITHUB COPILOT AUTOPILOT"
           echo "=============================================="
 
-          echo
-          echo "Copilot version:"
           copilot --version
 
           echo
@@ -1268,8 +1038,8 @@ jobs:
 
           copilot \
             --autopilot \
-            --allow-all \
-            --no-ask-user \
+            --yolo \
+            --no-banner \
             --max-autopilot-continues "$MAX_CONTINUES" \
             -p "$(cat /tmp/hope-agent-prompt.md)"
 
@@ -1285,7 +1055,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo
           echo "=============================================="
           echo "POST-AGENT CHECK"
           echo "=============================================="
@@ -1296,20 +1065,17 @@ jobs:
 
           echo
           echo "Recent commits:"
-          git --no-pager log \
-            --oneline \
-            --decorate \
-            -15
+          git --no-pager log --oneline --decorate -15
 
           echo
           echo "SUPERPROMPT:"
-          if [[ -f docs/roadmap/SUPERPROMPT.md ]]; then
-            echo "YES"
-          else
-            echo "NO"
-            echo "::error::SUPERPROMPT disappeared."
-            exit 1
-          fi
+          [[ -f docs/roadmap/SUPERPROMPT.md ]] \
+            && echo "YES" \
+            || {
+              echo "NO"
+              echo "::error::SUPERPROMPT disappeared."
+              exit 1
+            }
 
           echo
           echo "STATE candidates:"
@@ -1336,8 +1102,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Checking Git diff..."
-
           git diff --check
 
           echo
@@ -1348,7 +1112,7 @@ jobs:
           echo "Git diff check: OK"
 
       # ============================================================
-      # 27 — RUN FLUTTER VERIFICATION
+      # 27 — FLUTTER VERIFICATION
       # ============================================================
 
       - name: Verify Flutter project
@@ -1357,14 +1121,12 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Running Flutter verification..."
-
           flutter pub get
 
-          dart format --output=none --set-exit-if-changed \
-            lib test \
-            2>/dev/null \
-            || true
+          dart format \
+            --output=none \
+            --set-exit-if-changed \
+            lib test
 
           flutter analyze
 
@@ -1376,7 +1138,7 @@ jobs:
           echo "Flutter verification completed."
 
       # ============================================================
-      # 28 — RUN NODE VERIFICATION
+      # 28 — ROOT NODE VERIFICATION
       # ============================================================
 
       - name: Verify Node project
@@ -1387,18 +1149,15 @@ jobs:
 
           echo "Running root Node verification..."
 
-          if npm run | grep -qE \
-            '^[[:space:]]+lint'; then
+          if npm run | grep -qE '^[[:space:]]+lint'; then
             npm run lint
           fi
 
-          if npm run | grep -qE \
-            '^[[:space:]]+test'; then
+          if npm run | grep -qE '^[[:space:]]+test'; then
             npm test
           fi
 
-          if npm run | grep -qE \
-            '^[[:space:]]+build'; then
+          if npm run | grep -qE '^[[:space:]]+build'; then
             npm run build
           fi
 
@@ -1406,7 +1165,7 @@ jobs:
           echo "Root Node verification completed."
 
       # ============================================================
-      # 29 — RUN BACKEND VERIFICATION
+      # 29 — BACKEND VERIFICATION
       # ============================================================
 
       - name: Verify backend project
@@ -1415,22 +1174,17 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Running backend verification..."
-
           cd backend
 
-          if npm run | grep -qE \
-            '^[[:space:]]+lint'; then
+          if npm run | grep -qE '^[[:space:]]+lint'; then
             npm run lint
           fi
 
-          if npm run | grep -qE \
-            '^[[:space:]]+test'; then
+          if npm run | grep -qE '^[[:space:]]+test'; then
             npm test
           fi
 
-          if npm run | grep -qE \
-            '^[[:space:]]+build'; then
+          if npm run | grep -qE '^[[:space:]]+build'; then
             npm run build
           fi
 
@@ -1446,7 +1200,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo
           echo "=============================================="
           echo "FINAL REPOSITORY STATUS"
           echo "=============================================="
@@ -1459,10 +1212,7 @@ jobs:
 
           echo
           echo "Recent commits:"
-          git --no-pager log \
-            --oneline \
-            --decorate \
-            -10
+          git --no-pager log --oneline --decorate -10
 
           echo
           echo "Changed files:"
@@ -1478,20 +1228,14 @@ jobs:
           set -Eeuo pipefail
 
           git config user.name "HOPE Copilot Agent"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
 
           if git diff --cached --quiet; then
-
             echo "No uncommitted changes after agent execution."
-
           else
-
-            git commit \
-              -m "feat(hope): complete autonomous session"
-
+            git commit -m "feat(hope): complete autonomous session"
           fi
 
       # ============================================================
