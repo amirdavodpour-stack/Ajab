@@ -1,22 +1,22 @@
-name: HOPE Bootstrap → Extract → Codespace → GitHub Copilot Autopilot
+name: HOPE Bootstrap → ZIP → Prepare → Copilot Autopilot
 
 on:
   workflow_dispatch:
     inputs:
       archive:
-        description: "ZIP filename in repository. Leave empty for auto-detect."
+        description: "ZIP filename in repository. Leave empty to auto-detect."
         required: false
         type: string
         default: ""
 
       start_agent:
-        description: "Start GitHub Copilot automatically after bootstrap."
+        description: "Start GitHub Copilot automatically."
         required: false
         type: boolean
         default: true
 
       max_autopilot_continues:
-        description: "Maximum Copilot autopilot continuations for this run."
+        description: "Maximum Copilot autonomous continuations."
         required: false
         type: number
         default: 12
@@ -26,24 +26,23 @@ permissions:
   copilot-requests: write
 
 concurrency:
-  group: hope-autonomous-bootstrap-${{ github.ref }}
+  group: hope-bootstrap-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  BOOTSTRAP_DIR: ".hope-bootstrap"
-  EXTRACT_DIR: ".hope-bootstrap/extracted"
+  STAGING_DIR: /tmp/hope-bootstrap
+  REPO_DIR: ${{ github.workspace }}
 
 jobs:
-
-  bootstrap-and-agent:
-    name: HOPE Bootstrap + Copilot Agent
+  bootstrap:
+    name: Bootstrap HOPE
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
 
       # ============================================================
-      # 01. CHECKOUT
+      # 1 — CHECKOUT
       # ============================================================
 
       - name: Checkout repository
@@ -53,44 +52,31 @@ jobs:
           persist-credentials: true
 
       # ============================================================
-      # 02. SHOW ENVIRONMENT
+      # 2 — INITIALIZE
       # ============================================================
 
-      - name: Show environment
+      - name: Initialize bootstrap
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          echo "=================================================="
-          echo "HOPE AUTONOMOUS BOOTSTRAP"
-          echo "=================================================="
-          echo
+          echo "=============================================="
+          echo "HOPE BOOTSTRAP"
+          echo "=============================================="
           echo "Repository : $GITHUB_REPOSITORY"
           echo "Branch     : $GITHUB_REF_NAME"
           echo "Commit     : $GITHUB_SHA"
-          echo "Runner     : $RUNNER_OS"
-          echo
+          echo "Workspace  : $GITHUB_WORKSPACE"
+
+          rm -rf "$STAGING_DIR"
+          mkdir -p "$STAGING_DIR"
 
       # ============================================================
-      # 03. CLEAN PREVIOUS BOOTSTRAP
+      # 3 — FIND ZIP
       # ============================================================
 
-      - name: Prepare bootstrap workspace
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          rm -rf "$BOOTSTRAP_DIR"
-
-          mkdir -p "$BOOTSTRAP_DIR"
-          mkdir -p "$EXTRACT_DIR"
-
-      # ============================================================
-      # 04. FIND ZIP
-      # ============================================================
-
-      - name: Detect project ZIP
-        id: zip
+      - name: Find HOPE ZIP
+        id: archive
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -100,7 +86,7 @@ jobs:
           if [[ -n "$REQUESTED" ]]; then
 
             if [[ ! -f "$REQUESTED" ]]; then
-              echo "::error::Requested ZIP does not exist: $REQUESTED"
+              echo "::error::ZIP not found: $REQUESTED"
               exit 1
             fi
 
@@ -109,32 +95,31 @@ jobs:
           else
 
             mapfile -t ZIP_FILES < <(
-              find . \
+              find "$GITHUB_WORKSPACE" \
                 -type f \
                 -iname "*.zip" \
-                -not -path "./.git/*" \
-                -not -path "./$BOOTSTRAP_DIR/*" \
+                -not -path "$GITHUB_WORKSPACE/.git/*" \
                 | sort
             )
 
             if [[ "${#ZIP_FILES[@]}" -eq 0 ]]; then
-              echo "::error::No ZIP archive found in repository."
+              echo "::error::No ZIP file found."
               exit 1
             fi
 
-            # Prefer HOPE-named archives.
             SELECTED=""
 
-            for ZIP_FILE in "${ZIP_FILES[@]}"; do
-              BASE="$(basename "$ZIP_FILE")"
+            # Prefer a HOPE-named ZIP.
+            for FILE in "${ZIP_FILES[@]}"; do
+              BASE="$(basename "$FILE")"
 
               if [[ "$BASE" == *HOPE* || "$BASE" == *hope* ]]; then
-                SELECTED="$ZIP_FILE"
+                SELECTED="$FILE"
                 break
               fi
             done
 
-            # Fallback to first ZIP.
+            # Fallback.
             if [[ -z "$SELECTED" ]]; then
               SELECTED="${ZIP_FILES[0]}"
             fi
@@ -147,17 +132,17 @@ jobs:
           echo "archive=$SELECTED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 05. ZIP INTEGRITY
+      # 4 — VALIDATE ZIP
       # ============================================================
 
-      - name: Validate ZIP integrity
+      - name: Validate ZIP
         shell: bash
         env:
-          ZIP: ${{ steps.zip.outputs.archive }}
+          ZIP: ${{ steps.archive.outputs.archive }}
         run: |
           set -Eeuo pipefail
 
-          echo "Testing ZIP integrity..."
+          echo "Testing ZIP..."
 
           unzip -t "$ZIP"
 
@@ -165,22 +150,22 @@ jobs:
           echo "ZIP integrity: OK"
 
       # ============================================================
-      # 06. ZIP PATH SECURITY CHECK
+      # 5 — SECURITY CHECK
       # ============================================================
 
       - name: Validate archive paths
         shell: bash
         env:
-          ZIP: ${{ steps.zip.outputs.archive }}
+          ZIP: ${{ steps.archive.outputs.archive }}
         run: |
           set -Eeuo pipefail
 
-          echo "Checking ZIP paths for traversal..."
+          echo "Checking archive paths..."
 
           while IFS= read -r ENTRY; do
 
             if [[ "$ENTRY" == /* ]]; then
-              echo "::error::Absolute archive path detected: $ENTRY"
+              echo "::error::Absolute path detected: $ENTRY"
               exit 1
             fi
 
@@ -204,39 +189,51 @@ jobs:
           echo "Archive path validation: OK"
 
       # ============================================================
-      # 07. EXTRACT
+      # 6 — EXTRACT OUTSIDE GITHUB WORKSPACE
       # ============================================================
 
       - name: Extract project
         shell: bash
         env:
-          ZIP: ${{ steps.zip.outputs.archive }}
+          ZIP: ${{ steps.archive.outputs.archive }}
         run: |
           set -Eeuo pipefail
 
-          rm -rf "$EXTRACT_DIR"
-          mkdir -p "$EXTRACT_DIR"
+          EXTRACT="$STAGING_DIR/extracted"
 
-          unzip -q "$ZIP" -d "$EXTRACT_DIR"
+          rm -rf "$EXTRACT"
+          mkdir -p "$EXTRACT"
+
+          echo "Extracting into:"
+          echo "$EXTRACT"
+
+          unzip -q "$ZIP" -d "$EXTRACT"
 
           echo
-          echo "Extracted project:"
-          find "$EXTRACT_DIR" -maxdepth 2 -type d | sort | head -150
+          echo "Extraction complete."
+
+          find "$EXTRACT" \
+            -maxdepth 3 \
+            -type d \
+            | sort \
+            | head -200
 
       # ============================================================
-      # 08. DETECT PROJECT ROOT
+      # 7 — DETECT PROJECT ROOT
       # ============================================================
 
-      - name: Detect extracted project root
-        id: root
+      - name: Detect project root
+        id: project
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          ROOT="$EXTRACT_DIR"
+          EXTRACT="$STAGING_DIR/extracted"
 
-          mapfile -t DIRECTORIES < <(
-            find "$EXTRACT_DIR" \
+          ROOT="$EXTRACT"
+
+          mapfile -t TOP_DIRS < <(
+            find "$EXTRACT" \
               -mindepth 1 \
               -maxdepth 1 \
               -type d \
@@ -244,85 +241,155 @@ jobs:
               | sort
           )
 
-          mapfile -t FILES < <(
-            find "$EXTRACT_DIR" \
+          mapfile -t TOP_FILES < <(
+            find "$EXTRACT" \
               -mindepth 1 \
               -maxdepth 1 \
               -type f \
               | sort
           )
 
-          # Handle ZIPs containing one wrapper directory.
-          if [[ "${#FILES[@]}" -eq 0 && "${#DIRECTORIES[@]}" -eq 1 ]]; then
+          # ZIP has one wrapper directory.
+          if [[ "${#TOP_FILES[@]}" -eq 0 &&
+                "${#TOP_DIRS[@]}" -eq 1 ]]; then
 
-            CANDIDATE="${DIRECTORIES[0]}"
+            CANDIDATE="${TOP_DIRS[0]}"
 
             if [[ \
               -f "$CANDIDATE/pubspec.yaml" ||
               -f "$CANDIDATE/package.json" ||
-              -d "$CANDIDATE/docs" ||
-              -d "$CANDIDATE/.github"
+              -d "$CANDIDATE/.github" ||
+              -d "$CANDIDATE/docs"
             ]]; then
-              ROOT="$CANDIDATE"
-            fi
 
+              ROOT="$CANDIDATE"
+
+            fi
           fi
 
-          echo "Detected project root:"
+          echo "=============================================="
+          echo "PROJECT ROOT"
+          echo "=============================================="
           echo "$ROOT"
 
           echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 09. SYNCHRONIZE ZIP INTO GIT WORKSPACE
+      # 8 — FIND SUPERPROMPT AUTOMATICALLY
       # ============================================================
 
-      - name: Synchronize extracted project into repository
+      - name: Locate SUPERPROMPT
+        id: prompt
         shell: bash
         env:
-          ROOT: ${{ steps.root.outputs.project_root }}
+          ROOT: ${{ steps.project.outputs.project_root }}
         run: |
           set -Eeuo pipefail
 
-          echo "Synchronizing project..."
+          echo "Searching for SUPERPROMPT..."
 
-          # Preserve repository metadata and the running workflow.
+          PROMPT=""
+
+          # First preferred path.
+          if [[ -f "$ROOT/docs/roadmap/SUPERPROMPT.md" ]]; then
+            PROMPT="$ROOT/docs/roadmap/SUPERPROMPT.md"
+          fi
+
+          # Then search for known names.
+          if [[ -z "$PROMPT" ]]; then
+            while IFS= read -r FILE; do
+
+              if grep -q "HOPE SUPERPROMPT" "$FILE" 2>/dev/null; then
+                PROMPT="$FILE"
+                break
+              fi
+
+            done < <(
+              find "$ROOT" \
+                -type f \
+                \( \
+                  -iname "*SUPERPROMPT*.md" \
+                  -o \
+                  -iname "*SUPER-PROMPT*.md" \
+                \) \
+                | sort
+            )
+          fi
+
+          if [[ -z "$PROMPT" ]]; then
+            echo "::error::No HOPE SUPERPROMPT found."
+            echo
+            echo "Markdown files containing SUPERPROMPT:"
+            find "$ROOT" \
+              -type f \
+              -iname "*.md" \
+              | sort \
+              | grep -i "prompt" \
+              || true
+
+            exit 1
+          fi
+
+          echo "SUPERPROMPT found:"
+          echo "$PROMPT"
+
+          echo "prompt=$PROMPT" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 9 — SYNCHRONIZE SAFELY
+      # ============================================================
+
+      - name: Synchronize extracted project
+        shell: bash
+        env:
+          ROOT: ${{ steps.project.outputs.project_root }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "Synchronizing project into Git workspace..."
+
+          # IMPORTANT:
+          # Source is /tmp.
+          # Destination is GitHub workspace.
+          #
+          # Therefore source is NOT inside destination and
+          # rsync --delete cannot delete its own source.
+
           rsync -a \
             --delete \
             --exclude '.git/' \
             --exclude '.github/workflows/hope-bootstrap.yml' \
-            "$ROOT/" "./"
+            --exclude '.hope-bootstrap/' \
+            "$ROOT/" \
+            "$GITHUB_WORKSPACE/"
 
           echo
-          echo "Repository synchronized."
+          echo "Synchronization complete."
 
       # ============================================================
-      # 10. VERIFY SUPERPROMPT
+      # 10 — VERIFY SUPERPROMPT AFTER SYNC
       # ============================================================
 
-      - name: Verify SUPERPROMPT
-        id: superprompt
+      - name: Verify repository SUPERPROMPT
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          FILE="docs/roadmap/SUPERPROMPT.md"
+          PROMPT="docs/roadmap/SUPERPROMPT.md"
 
-          if [[ ! -f "$FILE" ]]; then
-            echo "::error::Missing $FILE"
+          if [[ ! -f "$PROMPT" ]]; then
+            echo "::error::$PROMPT missing after synchronization."
             exit 1
           fi
 
-          echo "SUPERPROMPT:"
-          echo "$FILE"
-
-          echo "superprompt=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Verified:"
+          echo "$PROMPT"
 
       # ============================================================
-      # 11. CREATE / UPDATE DEVCONTAINER
+      # 11 — PREPARE CODESPACES
       # ============================================================
 
-      - name: Prepare GitHub Codespaces environment
+      - name: Prepare Codespaces configuration
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -331,15 +398,14 @@ jobs:
 
           cat > .devcontainer/devcontainer.json <<'EOF'
           {
-            "name": "HOPE Super App Development",
+            "name": "HOPE Super App",
             "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
             "features": {
               "ghcr.io/devcontainers/features/git:1": {},
               "ghcr.io/devcontainers/features/github-cli:1": {},
-              "ghcr.io/devcontainers/features/node:2": {
-                "version": "lts"
-              },
-              "ghcr.io/devcontainers/features/copilot-cli:1": {}
+              "ghcr.io/devcontainers/features/node:1": {
+                "version": "22"
+              }
             },
             "customizations": {
               "vscode": {
@@ -349,106 +415,69 @@ jobs:
                   "eamodio.gitlens"
                 ]
               }
-            },
-            "postCreateCommand": "bash .devcontainer/hope-post-create.sh"
+            }
           }
           EOF
 
-          cat > .devcontainer/hope-post-create.sh <<'EOF'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-
-          echo "=========================================="
-          echo "HOPE Codespace initialization"
-          echo "=========================================="
-
-          if command -v flutter >/dev/null 2>&1; then
-            flutter --version || true
-
-            if [[ -f pubspec.yaml ]]; then
-              flutter pub get
-            fi
-          fi
-
-          if [[ -f backend/package.json ]]; then
-            (
-              cd backend
-              if [[ -f package-lock.json ]]; then
-                npm ci
-              else
-                npm install
-              fi
-            )
-          fi
-
-          if [[ -f package.json ]]; then
-            if [[ -f package-lock.json ]]; then
-              npm ci
-            else
-              npm install
-            fi
-          fi
-
-          echo "HOPE Codespace initialization complete."
-          EOF
-
-          chmod +x .devcontainer/hope-post-create.sh
-
       # ============================================================
-      # 12. CREATE AGENT HANDOFF
+      # 12 — CREATE AGENT HANDOFF
       # ============================================================
 
-      - name: Create Agent handoff metadata
+      - name: Create agent handoff
         shell: bash
         run: |
           set -Eeuo pipefail
 
+          mkdir -p docs/roadmap
+
           cat > docs/roadmap/AGENT-HANDOFF.md <<'EOF'
           # HOPE Autonomous Agent Handoff
 
-          The current autonomous implementation is controlled by:
+          ## Primary instruction
+
+          Read:
 
           `docs/roadmap/SUPERPROMPT.md`
 
-          Mandatory startup procedure:
+          before doing anything else.
 
-          1. Read SUPERPROMPT.md completely enough to locate STATE.
-          2. Read the STATE block.
-          3. Determine current session.
-          4. Execute ONLY that session.
-          5. Protect the jobs vertical.
-          6. Verify the implementation.
-          7. Update STATE.
-          8. Commit the completed work.
-          9. Do not claim unverified success.
-          10. Prepare the next session.
+          ## Rules
 
-          Product objective:
+          1. Read STATE.
+          2. Determine the current session.
+          3. Execute only that session.
+          4. Protect the existing jobs vertical.
+          5. Inspect actual source before making architectural decisions.
+          6. Do not invent schema/API behavior.
+          7. Do not fake incomplete features.
+          8. Verify every meaningful change.
+          9. Update STATE.
+          10. Commit the completed work.
+          11. Leave a safe checkpoint.
+          12. Prepare the project for the next session.
 
-          Build HOPE into a production-grade multi-vertical marketplace /
-          super-app with professional Flutter UX, robust backend,
-          reusable domain architecture, design system, security,
-          testing, dependency hygiene, CI/CD and release engineering.
+          ## Product target
 
-          UX quality target:
+          HOPE is being evolved into a professional multi-vertical
+          marketplace / super-app.
 
-          Comparable in maturity to leading super-apps and marketplaces,
-          including Snapp-class interaction quality, information
-          architecture, search/discovery, transaction tracking,
-          trust, responsiveness and perceived performance.
+          UX quality should be comparable to mature consumer
+          super-apps and marketplaces.
 
-          Do not clone proprietary branding, assets, source code or
-          pixel-identical screens from third-party products.
+          Snapp may be used as product-pattern inspiration only.
 
-          Existing jobs functionality is protected.
+          Do NOT copy proprietary branding, assets, source code,
+          or pixel-identical screens.
+
+          Existing jobs functionality must remain operational.
           EOF
 
       # ============================================================
-      # 13. SHOW CURRENT SESSION
+      # 13 — READ CURRENT SESSION
       # ============================================================
 
-      - name: Determine current HOPE session
-        id: session
+      - name: Read current session
+        id: state
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -456,48 +485,52 @@ jobs:
           FILE="docs/roadmap/SUPERPROMPT.md"
 
           SESSION="$(
-            grep -E '^[[:space:]]*current_session:' "$FILE" \
+            grep -E \
+              '^[[:space:]]*current_session:' \
+              "$FILE" \
               | head -1 \
-              | sed -E 's/.*current_session:[[:space:]]*([0-9]+).*/\1/'
+              | sed -E \
+              's/.*current_session:[[:space:]]*([0-9]+).*/\1/'
           )"
 
           if [[ -z "$SESSION" ]]; then
             SESSION="0"
           fi
 
-          echo "Current HOPE session: $SESSION"
+          echo "Current session: $SESSION"
 
           echo "current_session=$SESSION" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 14. PREPARE FLUTTER
-      # ============================================================
-
-      - name: Setup Flutter
-        if: hashFiles('pubspec.yaml') != ''
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      # ============================================================
-      # 15. PREPARE NODE
+      # 14 — NODE
       # ============================================================
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: ${{ hashFiles('package-lock.json') != '' && 'npm' || '' }}
 
       # ============================================================
-      # 16. INSTALL PROJECT DEPENDENCIES
+      # 15 — FLUTTER
       # ============================================================
 
-      - name: Prepare project dependencies
+      - name: Setup Flutter
+        if: ${{ hashFiles('pubspec.yaml') != '' }}
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # ============================================================
+      # 16 — INSTALL DEPENDENCIES
+      # ============================================================
+
+      - name: Prepare dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
+
+          echo "Preparing dependencies..."
 
           if [[ -f pubspec.yaml ]]; then
             flutter pub get
@@ -524,43 +557,16 @@ jobs:
           fi
 
       # ============================================================
-      # 17. BASELINE
+      # 17 — CREATE AGENT BRANCH
       # ============================================================
 
-      - name: Baseline verification
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -Eeuo pipefail
-
-          echo "===== FLUTTER ====="
-
-          if [[ -f pubspec.yaml ]]; then
-            flutter analyze || true
-          fi
-
-          echo
-          echo "===== BACKEND ====="
-
-          if [[ -f backend/package.json ]]; then
-            (
-              cd backend
-              npm test --if-present
-              npm run lint --if-present
-            ) || true
-          fi
-
-      # ============================================================
-      # 18. CREATE AUTONOMOUS BRANCH
-      # ============================================================
-
-      - name: Create Copilot working branch
+      - name: Create Copilot session branch
         id: branch
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          SESSION="${{ steps.session.outputs.current_session }}"
+          SESSION="${{ steps.state.outputs.current_session }}"
 
           if [[ "$SESSION" == "0" ]]; then
             SESSION="1"
@@ -569,37 +575,37 @@ jobs:
           BRANCH="copilot/hope-session-${SESSION}"
 
           git config user.name "HOPE Copilot Agent"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git switch -C "$BRANCH"
-
-          echo "Copilot branch: $BRANCH"
 
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 19. COMMIT BOOTSTRAP CHANGES
+      # 18 — COMMIT BOOTSTRAP
       # ============================================================
 
-      - name: Commit bootstrap changes
+      - name: Commit bootstrap preparation
         shell: bash
         run: |
           set -Eeuo pipefail
 
           git config user.name "HOPE Copilot Agent"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
 
           if git diff --cached --quiet; then
-            echo "No bootstrap changes to commit."
+            echo "No bootstrap changes."
           else
             git commit \
-              -m "chore(hope): bootstrap autonomous development session"
+              -m "chore(hope): prepare autonomous Copilot workspace"
           fi
 
       # ============================================================
-      # 20. PUSH BOOTSTRAP BRANCH
+      # 19 — PUSH BOOTSTRAP
       # ============================================================
 
       - name: Push bootstrap branch
@@ -615,7 +621,7 @@ jobs:
             "HEAD:$BRANCH"
 
       # ============================================================
-      # 21. INSTALL / UPDATE COPILOT CLI
+      # 20 — INSTALL COPILOT CLI
       # ============================================================
 
       - name: Install GitHub Copilot CLI
@@ -624,141 +630,216 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          curl -fsSL https://gh.io/copilot-install | bash
-
-          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-
-          if ! command -v copilot >/dev/null 2>&1; then
-            echo "::error::GitHub Copilot CLI installation failed."
-            exit 1
-          fi
+          npm install -g @github/copilot
 
           copilot --version
 
       # ============================================================
-      # 22. RUN COPILOT AUTOPILOT
+      # 21 — RUN COPILOT AUTOPILOT
       # ============================================================
 
-      - name: Run GitHub Copilot autonomously
+      - name: Run HOPE with GitHub Copilot Autopilot
         if: ${{ inputs.start_agent }}
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          SESSION: ${{ steps.session.outputs.current_session }}
-          BRANCH: ${{ steps.branch.outputs.branch }}
           MAX_CONTINUES: ${{ inputs.max_autopilot_continues }}
         run: |
           set -Eeuo pipefail
 
-          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          PROMPT="docs/roadmap/SUPERPROMPT.md"
 
-          PROMPT_FILE="docs/roadmap/SUPERPROMPT.md"
-
-          if [[ ! -f "$PROMPT_FILE" ]]; then
-            echo "::error::SUPERPROMPT not found."
+          if [[ ! -f "$PROMPT" ]]; then
+            echo "::error::SUPERPROMPT missing."
             exit 1
           fi
 
-          echo "=================================================="
-          echo "STARTING GITHUB COPILOT AUTOPILOT"
-          echo "=================================================="
-          echo
-          echo "Session : $SESSION"
-          echo "Branch  : $BRANCH"
-          echo
-          echo "Copilot will read:"
-          echo "$PROMPT_FILE"
-          echo
+          SESSION="${{ steps.state.outputs.current_session }}"
+          BRANCH="${{ steps.branch.outputs.branch }}"
 
-          cat > "$BOOTSTRAP_DIR/copilot-run-prompt.md" <<EOF
-          You are the autonomous implementation agent for the HOPE
-          Marketplace project.
+          cat > /tmp/hope-agent-prompt.md <<EOF
+          # HOPE AUTONOMOUS IMPLEMENTATION
 
-          FIRST:
-          Read docs/roadmap/SUPERPROMPT.md.
-          Treat its STATE block as the source of truth.
-          Determine the current session.
-          Execute ONLY that session.
+          You are the autonomous senior engineering agent responsible
+          for the HOPE Marketplace transformation.
 
-          IMPORTANT EXECUTION RULES:
+          ================================================
+          MANDATORY FIRST ACTION
+          ================================================
 
-          - Work directly in the current repository.
-          - Do NOT ask the human for clarification.
-          - Make reasonable engineering decisions yourself.
-          - Protect the existing jobs vertical.
-          - Do not implement unrelated improvements.
-          - Inspect actual source before changing architecture.
-          - Do not invent APIs, schema fields or dependency versions.
-          - Do not fake functionality.
-          - Keep changes production-oriented.
-          - Run the narrowest useful verification for the session.
-          - Fix errors caused by your own changes.
-          - Do not weaken security or tests simply to make CI green.
-          - Update docs when the session requires documentation.
-          - Rewrite the STATE block at the end.
-          - Record actual verification results in STATE.
-          - Do not claim success without verification.
+          Read:
 
-          GIT RULES:
+          docs/roadmap/SUPERPROMPT.md
 
-          Current branch:
-          ${BRANCH}
+          Treat the STATE block in that file as authoritative.
 
-          You may create commits required to complete the session.
-
-          NEVER push to main/master directly.
-
-          SESSION RULE:
-
-          Current session according to bootstrap:
+          Current bootstrap session:
           ${SESSION}
 
-          Follow SUPERPROMPT.md even if the value above differs from
-          the document; the document's STATE is authoritative.
+          Current Git branch:
+          ${BRANCH}
 
-          PRODUCT QUALITY:
+          ================================================
+          EXECUTION
+          ================================================
 
-          HOPE is being evolved toward a polished multi-vertical
-          marketplace / super-app.
+          Execute ONLY the current session defined by
+          docs/roadmap/SUPERPROMPT.md.
 
-          The UI/UX quality target is comparable to mature products
-          such as Snapp, but DO NOT copy proprietary branding, artwork,
-          source code, or pixel-identical screens.
+          Do not skip directly to later sessions.
 
-          Build reusable design systems and reusable product patterns.
+          Do not ask the human for routine engineering decisions.
 
-          AT THE END:
+          Make reasonable decisions based on:
+          - actual repository contents
+          - existing architecture
+          - current dependencies
+          - existing database
+          - existing jobs functionality
+          - the session specification
 
-          1. Verify.
-          2. Update SUPERPROMPT.md STATE.
-          3. Commit the completed session.
-          4. Leave the repository in a safe checkpoint.
-          5. Clearly report what was completed and what was not.
+          ================================================
+          JOBS PROTECTION
+          ================================================
+
+          The existing jobs vertical is production-critical.
+
+          Never intentionally remove or break it.
+
+          Preserve:
+          - existing behavior
+          - data compatibility
+          - API compatibility where practical
+          - existing user flows
+
+          ================================================
+          UI/UX
+          ================================================
+
+          HOPE should evolve toward a premium consumer super-app.
+
+          Use mature patterns found in products such as Snapp for
+          inspiration in:
+          - navigation
+          - search
+          - discovery
+          - cards
+          - bottom navigation
+          - status
+          - tracking
+          - transaction flows
+          - trust
+          - responsiveness
+          - perceived performance
+
+          DO NOT copy:
+          - logos
+          - proprietary assets
+          - source code
+          - proprietary branding
+          - pixel-identical screens
+
+          Build an original HOPE design system.
+
+          ================================================
+          ENGINEERING
+          ================================================
+
+          Before changing architecture:
+          inspect the real source.
+
+          Before changing database:
+          inspect the real schema.
+
+          Before upgrading dependencies:
+          inspect compatibility.
+
+          Never invent functionality.
+
+          Never fake backend behavior with UI-only state.
+
+          Never weaken security to make a build pass.
+
+          ================================================
+          VERIFICATION
+          ================================================
+
+          After implementation:
+
+          1. Run the narrowest meaningful verification.
+          2. Fix failures caused by your changes.
+          3. Re-run verification.
+          4. Record actual results.
+
+          Do NOT claim a test passed if it was not run.
+
+          ================================================
+          STATE
+          ================================================
+
+          At the end:
+
+          1. Rewrite the STATE block in SUPERPROMPT.md.
+          2. Record what actually shipped.
+          3. Record what did not ship.
+          4. Record verification results.
+          5. Record risks.
+          6. Define next_session accurately.
+
+          ================================================
+          GIT
+          ================================================
+
+          Commit the completed session.
+
+          Stay on:
+
+          ${BRANCH}
+
+          Never intentionally push directly to main/master.
+
+          ================================================
+          FINAL CONDITION
+          ================================================
+
+          Leave the repository in a safe checkpoint.
+
+          If the session cannot be safely completed, stop at the
+          last verified checkpoint and document the incomplete work
+          in STATE.
+
+          Do not leave knowingly broken code.
           EOF
 
-          echo "Launching Copilot..."
+          echo "=============================================="
+          echo "STARTING COPILOT"
+          echo "=============================================="
+          echo "Session: $SESSION"
+          echo "Branch : $BRANCH"
+          echo
 
           copilot \
             --autopilot \
             --allow-all \
+            --no-ask-user \
             --max-autopilot-continues "$MAX_CONTINUES" \
-            -p "$(cat "$BOOTSTRAP_DIR/copilot-run-prompt.md")"
+            -p "$(cat /tmp/hope-agent-prompt.md)"
 
       # ============================================================
-      # 23. VERIFY AGENT RESULT
+      # 22 — VERIFY AGENT OUTPUT
       # ============================================================
 
-      - name: Verify Copilot result
+      - name: Verify agent output
         if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          echo "=================================================="
-          echo "POST-COPILOT VERIFICATION"
-          echo "=================================================="
+          echo "=============================================="
+          echo "POST-AGENT CHECK"
+          echo "=============================================="
 
           echo
           echo "Git status:"
@@ -766,27 +847,53 @@ jobs:
 
           echo
           echo "Recent commits:"
-          git log --oneline -8 || true
+          git log --oneline -10 || true
 
           echo
-          echo "SUPERPROMPT STATE:"
-          if [[ -f docs/roadmap/SUPERPROMPT.md ]]; then
+          echo "SUPERPROMPT exists:"
 
-            awk '
-              /```yaml/ {inside=1; next}
-              inside && /^```/ {exit}
-              inside {print}
-            ' docs/roadmap/SUPERPROMPT.md | tail -120
+          if [[ -f docs/roadmap/SUPERPROMPT.md ]]; then
+            echo "YES"
+
+            echo
+            echo "Current STATE:"
+            sed -n '/```yaml/,$p' \
+              docs/roadmap/SUPERPROMPT.md \
+              | tail -160
 
           else
-            echo "SUPERPROMPT missing"
+            echo "NO"
+            exit 1
           fi
 
       # ============================================================
-      # 24. PUSH FINAL AGENT CHANGES
+      # 23 — COMMIT ANY REMAINING AGENT CHANGES
       # ============================================================
 
-      - name: Push Copilot changes
+      - name: Commit remaining agent changes
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "HOPE Copilot Agent"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No remaining changes."
+          else
+            git commit \
+              -m "feat(hope): complete autonomous session"
+          fi
+
+      # ============================================================
+      # 24 — PUSH FINAL RESULT
+      # ============================================================
+
+      - name: Push final result
         if: always()
         shell: bash
         run: |
@@ -794,25 +901,13 @@ jobs:
 
           BRANCH="${{ steps.branch.outputs.branch }}"
 
-          git config user.name "HOPE Copilot Agent"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-
-          if git diff --cached --quiet; then
-            echo "No uncommitted changes."
-          else
-            git commit \
-              -m "feat(hope): complete autonomous session"
-          fi
-
           git push \
             --force-with-lease \
             origin \
             "HEAD:$BRANCH"
 
       # ============================================================
-      # 25. FINAL REPORT
+      # 25 — SUMMARY
       # ============================================================
 
       - name: Final summary
@@ -821,24 +916,15 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          BRANCH="${{ steps.branch.outputs.branch }}"
-          SESSION="${{ steps.session.outputs.current_session }}"
-
           echo
-          echo "=================================================="
-          echo "HOPE AUTONOMOUS SESSION COMPLETE"
-          echo "=================================================="
+          echo "=============================================="
+          echo "HOPE BOOTSTRAP FINISHED"
+          echo "=============================================="
           echo
-          echo "Session : $SESSION"
-          echo "Branch  : $BRANCH"
+          echo "Session : ${{ steps.state.outputs.current_session }}"
+          echo "Branch  : ${{ steps.branch.outputs.branch }}"
           echo
-          echo "The next agent/session must read:"
+          echo "SUPERPROMPT:"
           echo "docs/roadmap/SUPERPROMPT.md"
           echo
-          echo "STATE is the persistent handoff mechanism."
-          echo
-          echo "Bootstrap/Codespaces configuration:"
-          echo ".devcontainer/devcontainer.json"
-          echo
-          echo "Agent handoff:"
-          echo "docs/roadmap/AGENT-HANDOFF.md"
+          echo "The next session is controlled by STATE."
